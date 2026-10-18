@@ -477,11 +477,34 @@ def _create_default_vector_store(dimension: int = None) -> QdrantVectorStore:
 # Cache functions removed - using unified embedder with internal caching
 
 
+def _normalize_embedding_batch(embeddings: Any) -> List[List[float]]:
+    """Normalize a single vector or a batch of vectors to nested Python lists."""
+    if hasattr(embeddings, "tolist"):
+        embeddings = embeddings.tolist()
+
+    if not isinstance(embeddings, (list, tuple)):
+        raise TypeError(f"Unsupported embedding batch type: {type(embeddings).__name__}")
+    if not embeddings:
+        return []
+
+    first = embeddings[0]
+    if hasattr(first, "tolist"):
+        first = first.tolist()
+
+    if isinstance(first, (list, tuple)):
+        return [
+            vector.tolist() if hasattr(vector, "tolist") else list(vector)
+            for vector in embeddings
+        ]
+
+    return [list(embeddings)]
+
+
 def index_chunks(
     store = None, 
     chunks: List[Dict] = None, 
     cache_db: Optional[str] = None, 
-    batch_size: int = 64,
+    batch_size: int = 10,
     rag_namespace: str = "default"
 ) -> None:
     """
@@ -516,32 +539,11 @@ def index_chunks(
         part = processed_texts[i:i+batch_size]
         try:
             # Use unified embedder directly (handles caching internally)
-            part_vecs = embedder.encode(part)
-            
-            # Normalize to List[List[float]]
-            if not isinstance(part_vecs, list):
-                # 单个numpy数组转为列表中的列表
-                if hasattr(part_vecs, "tolist"):
-                    part_vecs = [part_vecs.tolist()]
-                else:
-                    part_vecs = [list(part_vecs)]
-            else:
-                # 检查是否是嵌套列表
-                if part_vecs and not isinstance(part_vecs[0], (list, tuple)) and hasattr(part_vecs[0], "__len__"):
-                    # numpy数组列表 -> 转换每个数组
-                    normalized_vecs = []
-                    for v in part_vecs:
-                        if hasattr(v, "tolist"):
-                            normalized_vecs.append(v.tolist())
-                        else:
-                            normalized_vecs.append(list(v))
-                    part_vecs = normalized_vecs
-                elif part_vecs and not isinstance(part_vecs[0], (list, tuple)):
-                    # 单个向量被误判为列表，实际应该包装成[[...]]
-                    if hasattr(part_vecs, "tolist"):
-                        part_vecs = [part_vecs.tolist()]
-                    else:
-                        part_vecs = [list(part_vecs)]
+            part_vecs = _normalize_embedding_batch(embedder.encode(part))
+            if len(part_vecs) != len(part):
+                raise ValueError(
+                    f"Embedding count mismatch: expected {len(part)}, got {len(part_vecs)}"
+                )
             
             for v in part_vecs:
                 try:
@@ -573,10 +575,12 @@ def index_chunks(
                     import time
                     time.sleep(2)  # 等待2秒避免频率限制
                     
-                    small_vecs = embedder.encode(small_part)
-                    # Normalize to List[List[float]]
-                    if isinstance(small_vecs, list) and small_vecs and not isinstance(small_vecs[0], list):
-                        small_vecs = [small_vecs]
+                    small_vecs = _normalize_embedding_batch(embedder.encode(small_part))
+                    if len(small_vecs) != len(small_part):
+                        raise ValueError(
+                            f"Embedding count mismatch: expected {len(small_part)}, "
+                            f"got {len(small_vecs)}"
+                        )
                     
                     for v in small_vecs:
                         if hasattr(v, "tolist"):
